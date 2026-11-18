@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="120" height="120" viewBox="0 0 120 120">
+  <path d="M26 12h50l18 18v78H26z" fill="#111e2e" stroke="#f5a524" stroke-width="3"/>
+  <path d="M76 12v18h18" fill="none" stroke="#f5a524" stroke-width="3"/>
+  <path d="M40 48h40M40 60h40M40 72h28" stroke="#8fb3c9" stroke-width="3" stroke-linecap="round"/>
+  <g transform="rotate(-12 82 90)">
+    <rect x="58" y="76" width="48" height="26" rx="4" fill="none" stroke="#d64545" stroke-width="3"/>
+    <text x="82" y="94" text-anchor="middle" font-family="monospace" font-size="12" fill="#ff8a8a">DRAFT</text>
+  </g>
+</svg>

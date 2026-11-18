@@ -1,0 +1,22 @@
+TRACE AI — how to run
+=====================
+
+1. Install dependencies (once)
+   .venv/bin/pip install -r requirements.txt
+
+2. Create the first admin account (once, on the server terminal)
+   .venv/bin/python -m modules.auth create-admin --email admin@yourdept.gov.in --name "Admin Name"
+   (Running it again with the same email resets that admin's password.)
+
+3. Start the app
+   .venv/bin/streamlit run app.py
+
+4. Officer access
+   - Officer opens the app -> "Request access" -> fills name, badge no., station, email, password.
+   - Admin signs in -> "Admin" tab -> Approve / Reject.
+   - Only approved accounts can sign in. Disable an account any time; it is signed out immediately.
+
+Optional settings (environment variables)
+   TRACE_ALLOWED_EMAIL_DOMAINS="gov.in,police.gov.in"   only these email domains can register
+   TRACE_JWT_SECRET="<long random string>"              otherwise auto-created in data/.jwt_secret
+   TRACE_SESSION_HOURS=8                                login expiry
