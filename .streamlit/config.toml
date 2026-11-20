@@ -1,0 +1,3 @@
+[server]
+# Large forensic images (disk/memory/PCAP). Bigger files: use the server import folder.
+maxUploadSize = 4096

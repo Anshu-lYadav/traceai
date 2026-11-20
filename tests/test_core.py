@@ -19,6 +19,15 @@ from modules.search_engine import search_evidence
 from modules.search_engine import make_chunks
 from streamlit.testing.v1 import AppTest
 
+import os
+os.environ["TRACE_DISABLE_WORKERS"] = "1"
+_KEY_DIR = tempfile.TemporaryDirectory()
+
+
+def setUpModule():
+    from modules import crypto
+    crypto.KEY_DIR = Path(_KEY_DIR.name)
+
 
 class MemoryUpload:
     def __init__(self, name, content):
@@ -205,13 +214,11 @@ class PersistenceTests(unittest.TestCase):
                 first = database.list_evidence("CASE-A")[0]
                 shared_path = first["original_path"]
 
-                connection = sqlite3.connect(database.DATABASE_PATH)
-                connection.execute(
-                    "UPDATE evidence SET original_path=? WHERE evidence_id=?",
-                    (shared_path, second_item["evidence_id"]),
-                )
-                connection.commit()
-                connection.close()
+                with database._connect() as connection:
+                    connection.execute(
+                        "UPDATE evidence SET original_path=? WHERE evidence_id=?",
+                        (shared_path, second_item["evidence_id"]),
+                    )
 
                 result = database.delete_evidence("CASE-A", first_item["evidence_id"])
 
@@ -250,7 +257,10 @@ class PersistenceTests(unittest.TestCase):
                 self.assertEqual([case["case_id"] for case in database.list_cases()], ["CASE-B"])
                 self.assertEqual(len(database.list_evidence("CASE-B")), 1)
                 self.assertEqual(database.list_chat_messages("CASE-A"), [])
-                self.assertEqual(database.list_activity("CASE-A"), [])
+                # The signed audit trail is retained (append-only) after deletion.
+                events = [event["event_type"] for event in database.list_activity("CASE-A")]
+                self.assertIn("case_deleted", events)
+                self.assertTrue(database.verify_audit_chain()["valid"])
                 with self.assertRaises(ValueError):
                     database.delete_case("CASE-B")
 
@@ -278,7 +288,7 @@ class PersistenceTests(unittest.TestCase):
                 }
                 self.assertEqual(len(paths), 2)
 
-                legacy = "data\\evidence\\" + first["evidence_id"] + ".bin"
+                legacy = "data\\evidence\\" + first["evidence_id"] + ".enc"
                 with database._connect() as connection:
                     connection.execute(
                         "UPDATE evidence SET original_path=? WHERE evidence_id=?",
@@ -323,7 +333,8 @@ class PersistenceTests(unittest.TestCase):
 class AnalysisTests(unittest.TestCase):
 
     def test_uncited_or_fabricated_model_claim_is_not_shown_as_a_finding(self):
-        sources = [{"evidence_id": "EV-REAL", "filename": "record.txt"}]
+        sources = [{"evidence_id": "EV-REAL", "filename": "record.txt",
+                    "snippet": "Record 7: Alice is named as the account holder."}]
         uncited = enforce_valid_evidence_citations("Alice accessed the file.", sources)
         fabricated = enforce_valid_evidence_citations("Alice accessed the file [EV-FAKE].", sources)
         cited = enforce_valid_evidence_citations("Alice is named in the record [EV-REAL].", sources)
@@ -471,7 +482,7 @@ class AnalysisTests(unittest.TestCase):
                         "wire transfer", database.list_evidence("CASE-SEM"), top_k=1
                     )
         self.assertTrue(results)
-        self.assertEqual(results[0]["retrieval_mode"], "Hybrid semantic + TF-IDF")
+        self.assertTrue(results[0]["retrieval_mode"].startswith("Hybrid semantic + TF-IDF"))
 
 
 APP_PATH = str(Path(__file__).resolve().parents[1] / "app.py")

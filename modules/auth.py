@@ -88,9 +88,9 @@ def _now() -> datetime:
 
 
 def _audit(connection, email: str, event_type: str, actor_email: str | None = None) -> None:
-    connection.execute(
-        "INSERT INTO auth_log(email,event_type,actor_email,created_at) VALUES(?,?,?,?)",
-        (email, event_type, actor_email, _now().isoformat()),
+    """Record account events in the signed, hash-chained audit log."""
+    database.append_system_audit(
+        f"auth.{event_type}", {"email": email}, actor=actor_email or email, connection=connection,
     )
 
 
@@ -220,6 +220,14 @@ def get_user(user_id: str) -> dict[str, Any] | None:
     with database._connect() as connection:
         row = connection.execute(
             f"SELECT {_PUBLIC_COLUMNS} FROM users WHERE user_id=?", (user_id,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def get_user_by_email(email: str) -> dict[str, Any] | None:
+    with database._connect() as connection:
+        row = connection.execute(
+            f"SELECT {_PUBLIC_COLUMNS} FROM users WHERE email=?", (normalize_email(email),)
         ).fetchone()
     return dict(row) if row else None
 
@@ -379,12 +387,11 @@ def set_user_role(actor: dict[str, Any], user_id: str, role: str) -> None:
 
 
 def list_auth_log(limit: int = 200) -> list[dict[str, Any]]:
-    with database._connect() as connection:
-        rows = connection.execute(
-            "SELECT email,event_type,actor_email,created_at FROM auth_log ORDER BY log_id DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
-    return [dict(row) for row in rows]
+    return [
+        {"email": row["details"].get("email", ""), "event_type": row["event_type"][5:],
+         "actor_email": row["actor"], "created_at": row["created_at"]}
+        for row in database.list_system_audit("auth.", limit)
+    ]
 
 
 # --------------------------------------------------------------------------- #

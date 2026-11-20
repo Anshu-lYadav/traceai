@@ -14,24 +14,15 @@ FOLLOW_UP_PATTERN = re.compile(
 )
 
 
-def enforce_valid_evidence_citations(answer, evidence_results, output_kind="answer"):
-    """Reject generated prose with fabricated IDs or unsupported claims.
+REFUSAL_PATTERN = re.compile(
+    r"\b(insufficient evidence|not enough evidence|cannot answer|cannot determine|"
+    r"no relevant evidence|unable to answer)\b",
+    re.I,
+)
 
-    Explicit refusal language without citations is allowed. This remains a
-    citation-presence guard; it cannot prove that a cited passage entails a claim.
-    """
+
+def _rejection(evidence_results, output_kind):
     valid_ids = {str(item.get("evidence_id", "")).upper() for item in evidence_results}
-    cited_ids = {value.upper() for value in re.findall(r"\bEV-[A-Z0-9-]+\b", answer, re.I)}
-    refusal_pattern = re.compile(
-        r"\b(insufficient evidence|not enough evidence|cannot answer|cannot determine|"
-        r"no relevant evidence|unable to answer)\b",
-        re.I,
-    )
-    if cited_ids:
-        if cited_ids.issubset(valid_ids):
-            return answer
-    elif refusal_pattern.search(answer):
-        return answer
     source_list = ", ".join(sorted(identifier for identifier in valid_ids if identifier))
     label = "answer" if output_kind == "answer" else "report draft"
     return (
@@ -39,6 +30,49 @@ def enforce_valid_evidence_citations(answer, evidence_results, output_kind="answ
         "did not include valid evidence citations. Review the retrieved source passages directly.\n\n"
         f"Retrieved Evidence IDs: {source_list}"
     )
+
+
+def verify_generated_text(answer, evidence_results, output_kind="answer"):
+    """Return (text to show, verification report).
+
+    Each sentence is checked against the passages it cites (see
+    modules.claim_verifier); unsupported sentences are replaced by warnings. If
+    no claim survives, the whole output is withheld.
+    """
+    from modules.claim_verifier import verify_answer
+
+    cited_ids = {value.upper() for value in re.findall(r"\bEV-[A-Z0-9-]+\b", answer, re.I)}
+    if not cited_ids:
+        if REFUSAL_PATTERN.search(answer):
+            return answer, {"claims": [], "cited_claims": 0, "supported": 0, "unsupported": 0,
+                            "changed": False, "refusal": True}
+        return _rejection(evidence_results, output_kind), {
+            "claims": [], "cited_claims": 0, "supported": 0, "unsupported": 0,
+            "changed": True, "rejected": "no valid citations"}
+    report = verify_answer(answer, evidence_results)
+    if report["supported"] == 0:
+        report["rejected"] = "no claim was supported by its cited evidence"
+        return _rejection(evidence_results, output_kind), report
+    return report["text"], report
+
+
+def enforce_valid_evidence_citations(answer, evidence_results, output_kind="answer"):
+    """Backward-compatible wrapper that returns only the checked text."""
+    return verify_generated_text(answer, evidence_results, output_kind)[0]
+
+
+def _chat(messages, *, temperature=0.2, timeout=180, tools=None, num_predict=None):
+    payload = {
+        "model": MODEL_NAME,
+        "messages": messages,
+        "stream": False,
+        "options": {"temperature": temperature, **({"num_predict": num_predict} if num_predict else {})},
+    }
+    if tools:
+        payload["tools"] = tools
+    response = requests.post(OLLAMA_URL, json=payload, timeout=timeout)
+    response.raise_for_status()
+    return response.json()["message"]
 
 
 def resolve_followup_query(question, conversation_history=None):
@@ -87,14 +121,16 @@ FOLLOW-UP:
         return question
 
 
-def generate_answer(question, evidence_results, answer_language="English", conversation_history=None):
+def generate_answer(question, evidence_results, answer_language="English", conversation_history=None,
+                    with_report=False):
 
     if not evidence_results:
-        return (
+        text = (
             "INSUFFICIENT EVIDENCE\n\n"
             "No relevant evidence was retrieved. "
             "TRACE AI cannot answer this question based on the available records."
         )
+        return (text, {"claims": [], "refusal": True}) if with_report else text
 
     context = ""
 
@@ -196,7 +232,8 @@ Give a short, neutral conclusion based only on the evidence.
         response.raise_for_status()
 
         answer = response.json()["message"]["content"]
-        return enforce_valid_evidence_citations(answer, evidence_results)
+        text, report = verify_generated_text(answer, evidence_results)
+        return (text, report) if with_report else text
 
     except requests.exceptions.ConnectionError as exc:
         raise RuntimeError("Ollama is not running. Please start Ollama and try again.") from exc
@@ -208,10 +245,12 @@ Give a short, neutral conclusion based only on the evidence.
         raise RuntimeError(f"Local LLM request failed: {exc}") from exc
 
 
-def generate_case_report(case_id, evidence_results, leads=None, activity=None, answer_language="English"):
+def generate_case_report(case_id, evidence_results, leads=None, activity=None, answer_language="English",
+                         with_report=False):
     """Draft a sourced report section set from retrieved records and case notes."""
     if not evidence_results:
-        return "INSUFFICIENT EVIDENCE\n\nNo evidence passages were retrieved for this draft."
+        text = "INSUFFICIENT EVIDENCE\n\nNo evidence passages were retrieved for this draft."
+        return (text, {"claims": [], "refusal": True}) if with_report else text
 
     evidence_context = "\n\n".join(
         f"Evidence ID: {item['evidence_id']}\nFilename: {item['filename']}\n"
@@ -264,10 +303,64 @@ Limitations and Missing Information; Neutral Summary.
         )
         response.raise_for_status()
         draft = response.json()["message"]["content"]
-        return enforce_valid_evidence_citations(draft, evidence_results, "report")
+        text, report = verify_generated_text(draft, evidence_results, "report")
+        return (text, report) if with_report else text
     except requests.exceptions.ConnectionError as exc:
         raise RuntimeError("Ollama is not running. Start the local Ollama service and try again.") from exc
     except requests.exceptions.Timeout as exc:
         raise RuntimeError("The local model took too long to draft this report. Try fewer evidence passages.") from exc
     except Exception as exc:
         raise RuntimeError(f"Local LLM report request failed: {exc}") from exc
+
+
+# --------------------------------------------------------------------------- #
+# Translation (evidence and queries)
+# --------------------------------------------------------------------------- #
+TRANSLATION_CHUNK = 3000
+
+
+def detect_script(text):
+    """'devanagari', 'latin', or 'mixed'/'unknown' from character counts."""
+    deva = len(re.findall(r"[ऀ-ॿ]", text or ""))
+    latin = len(re.findall(r"[A-Za-z]", text or ""))
+    if not deva and not latin:
+        return "unknown"
+    if deva and latin and min(deva, latin) / max(deva, latin) > 0.25:
+        return "mixed"
+    return "devanagari" if deva > latin else "latin"
+
+
+def translate_query(query, target_language, timeout=30):
+    """Translate a short search query. Returns None if the model is unavailable."""
+    try:
+        reply = _chat([
+            {"role": "system", "content": "Translate search queries. Output only the translation, "
+                                          "keep names, numbers, IDs, e-mails and IP addresses unchanged."},
+            {"role": "user", "content": f"Translate to {target_language}:\n{query}"},
+        ], temperature=0, timeout=timeout, num_predict=120)
+        text = reply.get("content", "").strip().strip('"`')
+        return text if text and len(text) < 500 else None
+    except Exception:
+        return None
+
+
+def translate_text(text, target_language, progress=None):
+    """Translate evidence text in chunks. Raises RuntimeError if Ollama fails."""
+    parts = []
+    chunks = [text[i:i + TRANSLATION_CHUNK] for i in range(0, len(text), TRANSLATION_CHUNK)] or [""]
+    for index, chunk in enumerate(chunks):
+        try:
+            reply = _chat([
+                {"role": "system", "content": "You are a precise translator for police evidence. Translate "
+                 "faithfully. Do not summarize, omit, or add anything. Keep names, numbers, dates, IDs, "
+                 "e-mails, phone numbers, URLs and IP addresses exactly as written."},
+                {"role": "user", "content": f"Translate into {target_language}:\n\n{chunk}"},
+            ], temperature=0, timeout=240)
+        except requests.exceptions.ConnectionError as exc:
+            raise RuntimeError("Ollama is not running. Start Ollama to translate evidence.") from exc
+        except Exception as exc:
+            raise RuntimeError(f"Translation failed: {exc}") from exc
+        parts.append(reply.get("content", ""))
+        if progress:
+            progress((index + 1) / len(chunks))
+    return "\n".join(parts)
